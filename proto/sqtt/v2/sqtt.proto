@@ -1,0 +1,14 @@
+syntax = "proto3";
+package sqtt.v2;
+
+service SqttService {
+  rpc GetEvents (GetEventsRequest) returns (GetEventsResponse) {}
+}
+
+message GetEventsRequest {
+
+}
+
+message GetEventsResponse {
+
+}

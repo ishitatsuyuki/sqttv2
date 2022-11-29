@@ -7,7 +7,8 @@
     "dev": "vite",
     "build": "vue-tsc && vite build",
     "preview": "vite preview",
-    "generate:pb": "protoc -I ../proto --es_out src/gen --es_opt target=ts --connect-web_out src/gen --connect-web_opt target=ts protocol.proto"
+    "generate:pb": "protoc -I ../proto --es_out src/gen --es_opt target=ts --connect-web_out src/gen --connect-web_opt target=ts sqtt/v2/sqtt.proto",
+    "generate:buf": "buf generate ../proto"
   },
   "author": "Tatsuyuki Ishi <ishitatsuyuki@gmail.com>",
   "license": "Apache-2.0",
