@@ -1,25 +1,19 @@
-use anyhow::{bail, Result};
-use num_enum::IntoPrimitive;
+use anyhow::{bail, Context, Result};
+use num_enum::{IntoPrimitive, TryFromPrimitive};
 
-#[derive(IntoPrimitive)]
+#[derive(TryFromPrimitive, IntoPrimitive, Debug)]
 #[repr(u8)]
-pub enum SqttMarkerType {
-    RGP_SQTT_MARKER_IDENTIFIER_EVENT = 0x0,
-    RGP_SQTT_MARKER_IDENTIFIER_CB_START = 0x1,
-    RGP_SQTT_MARKER_IDENTIFIER_CB_END = 0x2,
-    RGP_SQTT_MARKER_IDENTIFIER_BARRIER_START = 0x3,
-    RGP_SQTT_MARKER_IDENTIFIER_BARRIER_END = 0x4,
-    RGP_SQTT_MARKER_IDENTIFIER_USER_EVENT = 0x5,
-    RGP_SQTT_MARKER_IDENTIFIER_GENERAL_API = 0x6,
-    RGP_SQTT_MARKER_IDENTIFIER_SYNC = 0x7,
-    RGP_SQTT_MARKER_IDENTIFIER_PRESENT = 0x8,
-    RGP_SQTT_MARKER_IDENTIFIER_LAYOUT_TRANSITION = 0x9,
-    RGP_SQTT_MARKER_IDENTIFIER_RENDER_PASS = 0xA,
-    RGP_SQTT_MARKER_IDENTIFIER_RESERVED2 = 0xB,
-    RGP_SQTT_MARKER_IDENTIFIER_BIND_PIPELINE = 0xC,
-    RGP_SQTT_MARKER_IDENTIFIER_RESERVED4 = 0xD,
-    RGP_SQTT_MARKER_IDENTIFIER_RESERVED5 = 0xE,
-    RGP_SQTT_MARKER_IDENTIFIER_RESERVED6 = 0xF
+// For several marker types we don't know their layouts; those are omitted from the enum.
+pub enum RgpSqttMarkerIdentifier {
+    Event = 0x0,
+    CbStart = 0x1,
+    CbEnd = 0x2,
+    BarrierStart = 0x3,
+    BarrierEnd = 0x4,
+    UserEvent = 0x5,
+    GeneralApi = 0x6,
+    LayoutTransition = 0x9,
+    BindPipeline = 0xC,
 }
 
 pub struct SqttUserdata {
@@ -32,18 +26,31 @@ impl SqttUserdata {
             bail!("Userdata is empty");
         }
         let ret = SqttUserdata { dw };
-        if Self::len(ret.dw[0]) != ret.dw.len() {
-            bail!("Userdata length {} does not match metadata {}", ret.dw.len(), Self::len(ret.dw[0]));
-        }
+        Self::try_id(ret.dw[0]).with_context(|| "Unknown marker type")?;
         Ok(ret)
     }
 
-    pub fn id(&self) -> u8 {
-        (self.dw[0] & ((1 << 4) - 1)) as _
+    pub fn id(&self) -> RgpSqttMarkerIdentifier {
+        Self::try_id(self.dw[0]).unwrap()
     }
 
-    pub fn len(dw0: u32) -> usize {
-        ((dw0 >> 4) & ((1 << 3) - 1)) as usize
+    pub fn try_id(dw0: u32) -> Result<RgpSqttMarkerIdentifier> {
+        ((dw0 & ((1 << 4) - 1)) as u8).try_into().map_err(Into::into)
+    }
+
+    pub fn len(dw0: u32) -> Result<usize> {
+        use RgpSqttMarkerIdentifier::*;
+        Ok(match Self::try_id(dw0)? {
+            Event => 3 + if (dw0 & (1 << 31)) != 0 { 3 } else { 0 },
+            CbStart => 4,
+            CbEnd => 3,
+            BarrierStart => 2,
+            BarrierEnd => 2,
+            UserEvent => 1, // TODO: adaptive length
+            GeneralApi => 1,
+            LayoutTransition => 2,
+            BindPipeline => 3,
+        })
     }
 
     pub fn api_type(&self) -> u32 {

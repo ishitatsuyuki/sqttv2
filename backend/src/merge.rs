@@ -20,9 +20,8 @@ pub struct MergedIteratorItem {
 /// The conceptual "position" index may represent a tournament comparison or a leaf node (a sorted
 /// array). There are `n - 1` comparisons, followed by `n` leaf nodes. The comparisons are stored in
 /// `min`, while the currently read index of the leaf nodes is stored in `idx`.
-/// This index scheme, inspired by binary heaps, has a cool property that allows it to easily mapped
-/// to a binary tree: The parent of a node at position `i` is at position `i / 2`, and the childrens
-/// are at positions `2 * i` and `2 * i + 1`.
+/// This index scheme allows to represent a binary tree as a flat vector: The parent of a node at
+/// position `i` is at position `i / 2`, and the children are at positions `2 * i` and `2 * i + 1`.
 pub struct MergedIterator<'a> {
     seqs: Vec<&'a [u32]>,
     min: Vec<(NodeMinimum, usize)>,

@@ -2,8 +2,12 @@ use std::cmp;
 use std::num::NonZeroU8;
 
 use anyhow::{bail, Result};
+use num_enum::{IntoPrimitive, TryFromPrimitive};
 use paste::paste;
-use tracing::log::warn;
+use tracing::warn;
+
+use crate::merge::{MergedIterator, MergedIteratorItem};
+use crate::rgp::{RgpAsicInfo, SqttGfxipLevel};
 
 macro_rules! gen_parser_inner {
     (
@@ -65,8 +69,11 @@ macro_rules! gen_parser {
 }
 
 gen_parser! {
-    packet Packet0x21 {
+    packet SetPc {
         [10: 8] dt: u8,
+        [15:11] wave: u8,
+        [60:16] pc: u64,
+        [63:61] reserved0: u8,
     }
 
     packet Packet0x31 {
@@ -123,22 +130,29 @@ gen_parser! {
     }
 
     packet WaveStart {
-        [ 6: 4] dt: u8,
-        [ 7: 7] a0: u8,
-        [ 9: 8] a1: u8,
-        [12:10] a2: u8,
-        [17:13] a3: u8,
+        [ 6: 5] dt: u8,
+        [ 7: 7] sh: u8,
+        [ 9: 8] simd: u8,
+        [12:10] wgp: u8,
+        [17:13] wave: u8,
         [21:18] stage: u8,
         [31:25] threads: u8,
     }
 
-    packet WaveAllocEnd {
-        [ 4: 4] is_end: u8,
+    packet WaveAlloc {
         [ 7: 5] dt: u8,
-        [ 8: 8] a0: u8,
-        [10: 9] a1: u8,
-        [13:11] a2: u8,
-        [19:15] a3: u8,
+        [ 8: 8] sh: u8,
+        [10: 9] simd: u8,
+        [13:11] wgp: u8,
+        [19:15] wave: u8,
+    }
+
+    packet WaveEnd {
+        [ 7: 5] dt: u8,
+        [ 8: 8] sh: u8,
+        [10: 9] simd: u8,
+        [13:11] wgp: u8,
+        [19:15] wave: u8,
     }
 
     packet GenericInst {
@@ -168,16 +182,32 @@ gen_parser! {
         [ 7: 4] dt_4: u8,
     }
 
-    packet Packet0x6 {
+    packet ShaderData {
         [ 7: 5] dt: u8,
+        [ 8: 8] sh: u8,
+        [10: 9] simd: u8,
+        [13:11] wgp: u8,
+        [19:15] wave: u8,
+        [51:20] val: u32,
     }
 
-    packet Packet0xe {
-        [ 5: 4] dt: u8,
+    packet ShaderDataImm {
+        [ 7: 5] dt: u8,
+        [ 8: 8] sh: u8,
+        [10: 9] simd: u8,
+        [13:11] wgp: u8,
+        [19:15] wave: u8,
+        [27:20] val: u32,
     }
 
-    packet Packet0xf {
+    packet AluExec {
         [ 5: 4] dt: u8,
+        [ 7: 6] a0: u8,
+    }
+
+    packet VmemExec {
+        [ 5: 4] dt: u8,
+        [ 7: 6] a0: u8,
     }
 }
 
@@ -194,11 +224,14 @@ impl<'a> BitReader<'a> {
             unimplemented!("Short input initialization not implemented");
         }
 
-        Self {
+        let mut ret = Self {
             input,
             bits: 0,
-            bits_consumed: 0,
-        }
+            bits_consumed: 64,
+        };
+        ret.refill();
+
+        ret
     }
 
     #[inline]
@@ -243,7 +276,7 @@ impl<'a> BitReader<'a> {
 
 /// The length in bits of a SQTT packet.
 /// `selector` is the bottom 8 bits of the packet.
-fn sqtt_packet_length(selector: u8) -> Option<NonZeroU8> {
+fn sqtt_packet_length(selector: u8, asic_info: &RgpAsicInfo) -> Option<NonZeroU8> {
     Some(
         NonZeroU8::new(match selector % 8 {
             2 => 20,
@@ -262,7 +295,7 @@ fn sqtt_packet_length(selector: u8) -> Option<NonZeroU8> {
                     _ => return None,
                 },
                 4 => {
-                    if true {
+                    if asic_info.gfxip_level == SqttGfxipLevel::GfxIp10_3.into() {
                         24
                     } else {
                         28
@@ -285,20 +318,20 @@ fn sqtt_packet_length(selector: u8) -> Option<NonZeroU8> {
     )
 }
 
-fn build_packet_length_table() -> [Option<NonZeroU8>; 256] {
+fn build_packet_length_table(asic_info: &RgpAsicInfo) -> [Option<NonZeroU8>; 256] {
     (0..=255)
-        .map(sqtt_packet_length)
+        .map(|i| sqtt_packet_length(i, asic_info))
         .collect::<Vec<_>>()
         .try_into()
         .unwrap()
 }
 
-pub fn parse_sqtt(i: &[u8]) -> Result<SqttChunk> {
+pub fn parse_sqtt(i: &[u8], asic_info: &RgpAsicInfo) -> Result<SqttChunk> {
     let mut reader = BitReader::new(i);
     let mut seq = 0;
     let mut timestamp = 0;
 
-    let pkt_len_table = build_packet_length_table();
+    let pkt_len_table = build_packet_length_table(asic_info);
 
     let mut result = SqttChunk::default();
 
@@ -336,7 +369,7 @@ pub fn parse_sqtt(i: &[u8]) -> Result<SqttChunk> {
                         }
                         ret
                     }
-                    2 => result.packet0x21.parse(&mut subreader, seq, &mut timestamp),
+                    2 => result.set_pc.parse(&mut subreader, seq, &mut timestamp),
                     3 => result.packet0x31.parse(&mut subreader, seq, &mut timestamp),
                     4 => result.packet0x41.parse(&mut subreader, seq, &mut timestamp),
                     5 => result.packet0x51.parse(&mut subreader, seq, &mut timestamp),
@@ -349,8 +382,16 @@ pub fn parse_sqtt(i: &[u8]) -> Result<SqttChunk> {
                     _ => Some(()),
                 },
                 4 => result.immediate.parse(&mut subreader, seq, &mut timestamp),
-                5 => result.wave_alloc_end.parse(&mut subreader, seq, &mut timestamp),
-                6 => result.packet0x6.parse(&mut subreader, seq, &mut timestamp),
+                5 => match selector % 32 {
+                    0x5 => result.wave_alloc.parse(&mut subreader, seq, &mut timestamp),
+                    0x15 => result.wave_end.parse(&mut subreader, seq, &mut timestamp),
+                    _ => unreachable!(),
+                },
+                6 => match selector % 32 {
+                    0x6 => result.shader_data.parse(&mut subreader, seq, &mut timestamp),
+                    0x16 => result.shader_data_imm.parse(&mut subreader, seq, &mut timestamp),
+                    _ => unreachable!(),
+                },
                 8 => {
                     let ret = result.short_timestamp.parse(&mut subreader, seq, &mut timestamp);
                     timestamp += *result.short_timestamp.dt_4.last().unwrap() as u64 + 4;
@@ -359,8 +400,8 @@ pub fn parse_sqtt(i: &[u8]) -> Result<SqttChunk> {
                 9 => result.reg_write.parse(&mut subreader, seq, &mut timestamp),
                 12 => result.wave_start.parse(&mut subreader, seq, &mut timestamp),
                 13 => result.immediate_one.parse(&mut subreader, seq, &mut timestamp),
-                14 => result.packet0xe.parse(&mut subreader, seq, &mut timestamp),
-                15 => result.packet0xf.parse(&mut subreader, seq, &mut timestamp),
+                14 => result.alu_exec.parse(&mut subreader, seq, &mut timestamp),
+                15 => result.vmem_exec.parse(&mut subreader, seq, &mut timestamp),
                 _ => Some(()),
             },
         };
@@ -371,6 +412,27 @@ pub fn parse_sqtt(i: &[u8]) -> Result<SqttChunk> {
         }
         seq += 1;
     }
+    dbg!(result.generic_inst.seq.len());
+    dbg!(result.valu_inst.seq.len());
+    dbg!(result.event_a.seq.len());
+    dbg!(result.event_b.seq.len());
+    dbg!(result.immediate.seq.len());
+    dbg!(result.immediate_one.seq.len());
+    dbg!(result.initiator.seq.len());
+    dbg!(result.short_timestamp.seq.len());
+    dbg!(result.long_timestamp.seq.len());
+    dbg!(result.set_pc.seq.len());
+    dbg!(result.packet0x31.seq.len());
+    dbg!(result.packet0x41.seq.len());
+    dbg!(result.packet0x51.seq.len());
+    dbg!(result.shader_data.seq.len());
+    dbg!(result.shader_data_imm.seq.len());
+    dbg!(result.alu_exec.seq.len());
+    dbg!(result.vmem_exec.seq.len());
+    dbg!(result.reg_write.seq.len());
+    dbg!(result.wave_start.seq.len());
+    dbg!(result.wave_alloc.seq.len());
+    dbg!(result.wave_end.seq.len());
 
     Ok(result)
 }
